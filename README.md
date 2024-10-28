@@ -6,4 +6,6 @@ Applied YOLOv5, Single Shot Detection, Faster R-CNN, EfficientDet for vehicle an
 
 Train datasets are self-photoed images in Macau, and partical char74k with Gil Sans fonts.
 
+Quick Start, provided test images in directory `images`.
+```bash
 ./quickrun.sh /path/to/your/image.jpg

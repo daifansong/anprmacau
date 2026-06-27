@@ -159,6 +159,25 @@ def validate_and_correct_plate(plate_input):
     return list(result)
 
 
+def filter_and_label_plate(plate_chars, avg_conf):
+    plate_str = "".join(plate_chars)
+    raw = "".join(c for c in plate_str if c.isalnum()).upper()
+    
+    # 1. Check length constraints
+    if len(raw) < 4 or len(raw) > 8:
+        return "无法识别", "invalid"
+        
+    # 2. Check confidence threshold
+    if avg_conf < 0.65:
+        return "识别模糊", "low_confidence"
+        
+    # 3. Check plate type (Macau formats vs other)
+    if (len(raw) in (5, 6) and raw.startswith('M')) or (len(raw) == 6 and raw.startswith('CM')):
+        return plate_str, "normal"
+    else:
+        return plate_str, "other"
+
+
 def segment(img):
 
     resized_img = resize_img(img)
@@ -201,6 +220,7 @@ def segment(img):
 
     i = 1  # Order
     plate = []
+    confidences = []
     for rect in boundingBoxes:
         img_cc = img_copy.copy()
         x, y, w, h = rect
@@ -213,11 +233,12 @@ def segment(img):
             detect_color(crop, crop_image)
 
             char_img = resize_char(crop)
-            possible_char = predict(char_img)
+            possible_char, conf = predict(char_img)
             #cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
             #cv2.putText(img, str(i), (x, y+h), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
             #cv2.putText(img, str(possible_char), (x + w - 25, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0 ,0, 255), 2)
             plate.append(possible_char)
+            confidences.append(conf)
             i = i + 1
     if len(color_list) == 0:
         char_color = 'Indeterminated'
@@ -226,8 +247,11 @@ def segment(img):
     attribute = 'tax_free' if char_color == 'yellow' else 'normal'
     color_list.clear()
     
+    avg_conf = np.mean(confidences) if confidences else 0.0
     corrected_plate = validate_and_correct_plate(plate)
-    return corrected_plate, char_color, attribute
+    
+    plate_str, status_label = filter_and_label_plate(corrected_plate, avg_conf)
+    return list(plate_str), char_color, attribute, avg_conf, status_label
 
 BASE_DIR = Path(__file__).resolve().parent
 file_name = str(BASE_DIR / 'files' / 'veh.csv')
@@ -404,7 +428,13 @@ def compare_plate(plate):
         return False
 
 
-def csv_related(plate, veh_type, np_color):
+def csv_related(plate, veh_type, np_color, status_label="normal"):
+    if status_label in ("invalid", "low_confidence"):
+        print(f"Ignored database logging for low-confidence/invalid plate: {plate} (Status: {status_label})")
+        if status_label != "invalid":
+            compare_plate(plate)
+        return
+        
     check()
     date_today = date.today()
     now = datetime.now()
@@ -435,12 +465,15 @@ def predict(img):
     img_t = transform(img)
     batch_t = torch.unsqueeze(img_t, 0)
     batch_t = batch_t.to(device)
-    out = model(batch_t)
-
-    _, indices = torch.sort(out, descending=True)
-    index = indices[0][0]
-    #print('\033[1m' + labels[index] + '\033[0m', end=' ')
-    return labels[index]
+    
+    with torch.no_grad():
+        out = model(batch_t)
+        probs = torch.softmax(out, dim=1)
+        
+    prob, index = torch.max(probs, dim=1)
+    char = labels[index.item()]
+    confidence = prob.item()
+    return char, confidence
 
 
 def resize_char(img):

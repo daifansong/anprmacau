@@ -296,15 +296,22 @@ def run_inference(model_name, source, ocr_model_path=None, suspected_csv_path=No
                 attribute = "normal"
                 is_suspected = False
                 try:
-                    plate_chars, char_color, attribute = character.segment(plate_crop)
+                    plate_chars, char_color, attribute, avg_conf, status_label = character.segment(plate_crop)
                     license_plate_str = "".join(str(v) for v in plate_chars)
-                    character.csv_related(license_plate_str, veh_class, char_color)
-                    is_suspected = character.compare_plate(license_plate_str)
+                    character.csv_related(license_plate_str, veh_class, char_color, status_label)
+                    is_suspected = character.compare_plate(license_plate_str) if status_label != "invalid" else False
                 except Exception as e:
                     print(f"OCR/CSV processing failed for plate: {e}")
+                    status_label = "invalid"
+                    avg_conf = 0.0
                     
                 cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 0, 255), 2)
-                plate_label = f"NP: {license_plate_str} | {char_color} | {attribute}"
+                if status_label == "invalid":
+                    plate_label = "NP: Unrecognized"
+                elif status_label == "low_confidence":
+                    plate_label = f"NP: Blurry ({license_plate_str})"
+                else:
+                    plate_label = f"NP: {license_plate_str} | {char_color}"
                 cv2.putText(frame, plate_label, (px1, max(py1 - 10, 15)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                             
@@ -314,7 +321,9 @@ def run_inference(model_name, source, ocr_model_path=None, suspected_csv_path=No
                     "plate_str": license_plate_str,
                     "plate_color": char_color,
                     "attribute": attribute,
-                    "is_suspected": is_suspected
+                    "is_suspected": is_suspected,
+                    "avg_conf": avg_conf,
+                    "status_label": status_label
                 })
                 
         yield path, frame, is_image, detections

@@ -213,9 +213,20 @@ function appendSessionLogRow(det) {
     const timeStr = new Date().toLocaleTimeString();
     const tr = document.createElement('tr');
     
-    const statusBadge = det.is_suspected 
-        ? '<span class="badge badge-alert">🚨 嫌疑车辆</span>' 
-        : '<span class="badge badge-normal">🟢 正常通行</span>';
+    let statusBadge = '';
+    if (det.is_suspected) {
+        statusBadge = '<span class="badge badge-alert">🚨 嫌疑车辆</span>';
+    } else {
+        if (det.status_label === 'invalid') {
+            statusBadge = '<span class="badge badge-alert">🔴 无法识别</span>';
+        } else if (det.status_label === 'low_confidence') {
+            statusBadge = '<span class="badge badge-warning">🟡 识别模糊</span>';
+        } else if (det.status_label === 'other') {
+            statusBadge = '<span class="badge badge-other">🔵 其他牌照</span>';
+        } else {
+            statusBadge = '<span class="badge badge-normal">🟢 正常通行</span>';
+        }
+    }
 
     tr.innerHTML = `
         <td>${timeStr}</td>
@@ -268,9 +279,17 @@ async function loadHistory() {
         
         logs.forEach(log => {
             const tr = document.createElement('tr');
-            const suspectedText = log.is_suspected 
-                ? '<span class="badge badge-alert">🚨 嫌疑布控</span>' 
-                : '<span class="badge badge-normal">🟢 正常</span>';
+            let suspectedText = '';
+            if (log.is_suspected) {
+                suspectedText = '<span class="badge badge-alert">🚨 嫌疑布控</span>';
+            } else {
+                const cleaned = log.plate.replace(/-/g, '').replace(/\s/g, '').toUpperCase();
+                if (cleaned.startsWith('M') || cleaned.startsWith('CM')) {
+                    suspectedText = '<span class="badge badge-normal">🟢 澳门牌照</span>';
+                } else {
+                    suspectedText = '<span class="badge badge-other">🔵 其他牌照</span>';
+                }
+            }
                 
             tr.innerHTML = `
                 <td>${log.id}</td>

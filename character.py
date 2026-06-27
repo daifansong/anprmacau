@@ -9,9 +9,44 @@ from datetime import date, datetime
 from pathlib import Path
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-ocr = torch.load('/content/Models/ocr.pth', map_location=device)
-ocr = ocr.module.to(device)
-ocr.eval()
+
+ocr = None
+
+def get_ocr_model(model_path=None):
+    global ocr
+    if ocr is not None:
+        return ocr
+    
+    paths_to_try = []
+    if model_path:
+        paths_to_try.append(Path(model_path))
+    
+    base_dir = Path(__file__).resolve().parent
+    paths_to_try.extend([
+        base_dir / 'models' / 'ocr.pth',
+        base_dir / 'ocr.pth',
+        Path('/content/Models/ocr.pth'),
+        Path('/content/ocr_april.pth')
+    ])
+    
+    for p in paths_to_try:
+        if p.exists():
+            try:
+                model = torch.load(str(p), map_location=device)
+                if hasattr(model, 'module'):
+                    model = model.module
+                ocr = model.to(device)
+                ocr.eval()
+                print(f"Successfully loaded OCR model from: {p}")
+                return ocr
+            except Exception as e:
+                print(f"Error loading OCR model from {p}: {e}")
+                
+    raise FileNotFoundError(
+        f"Could not find or load OCR model 'ocr.pth' in any of the expected paths: "
+        f"{[str(x) for x in paths_to_try]}. Please make sure the weights file exists."
+    )
+
 edge = 500
 labels = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 '''
@@ -143,31 +178,46 @@ def segment(img):
     color_list.clear()
     return plate, char_color, attribute
 
-file_name = 'veh.csv'
+BASE_DIR = Path(__file__).resolve().parent
+file_name = str(BASE_DIR / 'files' / 'veh.csv')
+suspected_path = str(BASE_DIR / 'files' / 'suspected.csv')
+
+if not Path(suspected_path).is_file() and Path('suspected.csv').is_file():
+    suspected_path = 'suspected.csv'
+if not Path(file_name).parent.is_dir():
+    file_name = 'veh.csv'
+
 fields = ['date', 'time', 'vehicle', 'plate', 'color']
-content = csv.reader(open('suspected.csv', 'r'))
 
 def check():
     if Path(file_name).is_file():
         pass
     else:
+        Path(file_name).parent.mkdir(parents=True, exist_ok=True)
         with open(file_name, 'x', newline='') as f:
             write_header = csv.DictWriter(f, fieldnames=fields)
             write_header.writeheader()
 
 
 def add(row):
-    with open('veh.csv', 'a+', newline='') as file:
+    with open(file_name, 'a+', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(row)
 
 
 def compare_plate(plate):
     i = 0
-    for row in content:
-        if plate == row[0]:
-            print(f'Warning! {plate} {row[1]}')
-            i += 1
+    if not Path(suspected_path).is_file():
+        print(f"Warning: Suspected plate list not found at: {suspected_path}")
+        return
+        
+    with open(suspected_path, 'r', encoding='utf-8') as f:
+        content = csv.reader(f)
+        header = next(content, None)  # skip header
+        for row in content:
+            if len(row) > 0 and plate == row[0]:
+                print(f'Warning! {plate} {row[1]}')
+                i += 1
     print('All Fine' if i == 0 else f'Found {i} vehicle suspected')
 
 
@@ -183,11 +233,12 @@ def csv_related(plate, veh_type, np_color):
 
 
 def predict(img):
+    model = get_ocr_model()
     img = Image.fromarray(img)
     img_t = transform(img)
     batch_t = torch.unsqueeze(img_t, 0)
     batch_t = batch_t.to(device)
-    out = ocr(batch_t)
+    out = model(batch_t)
 
     _, indices = torch.sort(out, descending=True)
     index = indices[0][0]

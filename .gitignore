@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.python-version
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Cloned third-party dependency repositories under experiments/
+experiments/yolov5/
+experiments/Yet-Another-EfficientDet-Pytorch/
+experiments/pytorch-ssd/
+
+# Outputs and Crops
+output/
+crops/
+vehicles/
+*.mp4
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+
+# Local Logs & Data
+veh.csv
+.DS_Store
+.idea/
+.vscode/

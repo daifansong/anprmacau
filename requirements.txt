@@ -1,0 +1,10 @@
+# Macau ANPR Project Requirements
+torch
+torchvision
+opencv-python
+pillow
+numpy
+tqdm
+matplotlib
+pandas
+PyYAML

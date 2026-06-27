@@ -7,6 +7,8 @@ from PIL import Image
 import csv
 from datetime import date, datetime
 from pathlib import Path
+import sqlite3
+import os
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -110,6 +112,53 @@ def resize_img(img):
         return resized_img
 
 
+def validate_and_correct_plate(plate_input):
+    if isinstance(plate_input, list):
+        plate_str = "".join(str(v) for v in plate_input)
+    else:
+        plate_str = str(plate_input)
+        
+    raw = "".join(c for c in plate_str if c.isalnum()).upper()
+    
+    LETTER_TO_DIGIT = {
+        'O': '0', 'I': '1', 'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'T': '7', 'J': '1', 'A': '4', 'D': '0'
+    }
+    DIGIT_TO_LETTER = {
+        '0': 'O', '1': 'I', '2': 'Z', '5': 'S', '8': 'B', '6': 'G', '7': 'T', '4': 'A'
+    }
+    
+    result = plate_str
+    if len(raw) == 6 and (raw.startswith('CM') or (raw[0] in ('C', '0', 'D') and raw[1] in ('M', 'N', 'W'))):
+        corrected = ['C', 'M']
+        for c in raw[2:]:
+            corrected.append(LETTER_TO_DIGIT.get(c, c))
+        corrected_str = "".join(corrected)
+        result = f"{corrected_str[:2]}-{corrected_str[2:4]}-{corrected_str[4:]}"
+    elif len(raw) == 5 and (raw[0] == 'M' or raw[0] in ('N', 'H', 'W', '1', 'V')):
+        corrected = ['M']
+        for c in raw[1:]:
+            corrected.append(LETTER_TO_DIGIT.get(c, c))
+        corrected_str = "".join(corrected)
+        result = f"{corrected_str[0]}-{corrected_str[1:3]}-{corrected_str[3:]}"
+    elif len(raw) == 6 and (raw[0] == 'M' or raw[0] in ('N', 'H', 'W', '1', 'V')):
+        corrected = ['M']
+        second_char = raw[1]
+        corrected.append(DIGIT_TO_LETTER.get(second_char, second_char))
+        for c in raw[2:]:
+            corrected.append(LETTER_TO_DIGIT.get(c, c))
+        corrected_str = "".join(corrected)
+        result = f"{corrected_str[:2]}-{corrected_str[2:4]}-{corrected_str[4:]}"
+    else:
+        if len(raw) == 5:
+            result = f"{raw[0]}-{raw[1:3]}-{raw[3:]}"
+        elif len(raw) == 6:
+            result = f"{raw[:2]}-{raw[2:4]}-{raw[4:]}"
+        else:
+            result = raw
+            
+    return list(result)
+
+
 def segment(img):
 
     resized_img = resize_img(img)
@@ -176,11 +225,14 @@ def segment(img):
         char_color = max(color_list, key=color_list.count)
     attribute = 'tax_free' if char_color == 'yellow' else 'normal'
     color_list.clear()
-    return plate, char_color, attribute
+    
+    corrected_plate = validate_and_correct_plate(plate)
+    return corrected_plate, char_color, attribute
 
 BASE_DIR = Path(__file__).resolve().parent
 file_name = str(BASE_DIR / 'files' / 'veh.csv')
 suspected_path = str(BASE_DIR / 'files' / 'suspected.csv')
+db_path = str(BASE_DIR / 'files' / 'anpr.db')
 
 if not Path(suspected_path).is_file() and Path('suspected.csv').is_file():
     suspected_path = 'suspected.csv'
@@ -188,6 +240,129 @@ if not Path(file_name).parent.is_dir():
     file_name = 'veh.csv'
 
 fields = ['date', 'time', 'vehicle', 'plate', 'color']
+
+# Initialize SQLite Database
+def init_db():
+    try:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Create traffic logs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS traffic_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,
+                time TEXT,
+                vehicle TEXT,
+                plate TEXT,
+                color TEXT
+            )
+        ''')
+        
+        # Create suspected plates table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suspected_plates (
+                plate TEXT PRIMARY KEY,
+                reason TEXT
+            )
+        ''')
+        conn.commit()
+        
+        # Migrate suspected.csv if database is empty
+        cursor.execute("SELECT COUNT(*) FROM suspected_plates")
+        count = cursor.fetchone()[0]
+        if count == 0 and Path(suspected_path).is_file():
+            try:
+                with open(suspected_path, 'r', encoding='utf-8') as f:
+                    content = csv.reader(f)
+                    header = next(content, None)  # skip header
+                    to_insert = []
+                    for row in content:
+                        if len(row) >= 2:
+                            to_insert.append((row[0].strip().upper(), row[1]))
+                        elif len(row) == 1:
+                            to_insert.append((row[0].strip().upper(), ''))
+                    if to_insert:
+                        cursor.executemany("INSERT OR IGNORE INTO suspected_plates (plate, reason) VALUES (?, ?)", to_insert)
+                        conn.commit()
+                print(f"Migrated {len(to_insert)} suspected plates from CSV to SQLite database.")
+            except Exception as e:
+                print(f"Error migrating suspected.csv to SQLite: {e}")
+                
+        conn.close()
+    except Exception as e:
+        print(f"Error initializing SQLite database: {e}")
+
+# Call init_db immediately at import
+init_db()
+
+# Suspected list memory cache
+suspected_cache = {}
+last_cache_load_time = 0
+
+def load_suspected_cache():
+    global suspected_cache, last_cache_load_time
+    db_file = Path(db_path)
+    if not db_file.exists():
+        return
+        
+    try:
+        current_mtime = os.path.getmtime(db_path)
+        if current_mtime > last_cache_load_time or not suspected_cache:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT plate, reason FROM suspected_plates")
+            rows = cursor.fetchall()
+            new_cache = {row[0].strip().upper(): row[1] for row in rows}
+            suspected_cache = new_cache
+            last_cache_load_time = current_mtime
+            conn.close()
+    except Exception as e:
+        print(f"Error loading suspected plates cache: {e}")
+
+# Database edit helpers
+def db_add_suspected(plate, reason=""):
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO suspected_plates (plate, reason) VALUES (?, ?)", (plate.strip().upper(), reason))
+        conn.commit()
+        conn.close()
+        sync_db_to_csv()
+        return True
+    except Exception as e:
+        print(f"Error adding suspected plate to SQLite: {e}")
+        return False
+
+def db_delete_suspected(plate):
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM suspected_plates WHERE plate = ?", (plate.strip().upper(),))
+        conn.commit()
+        conn.close()
+        sync_db_to_csv()
+        return True
+    except Exception as e:
+        print(f"Error deleting suspected plate from SQLite: {e}")
+        return False
+
+def sync_db_to_csv():
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT plate, reason FROM suspected_plates")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        with open(suspected_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['plate', 'reason'])
+            for row in rows:
+                writer.writerow(row)
+    except Exception as e:
+        print(f"Error syncing SQLite to CSV: {e}")
 
 def check():
     if Path(file_name).is_file():
@@ -206,19 +381,27 @@ def add(row):
 
 
 def compare_plate(plate):
-    i = 0
-    if not Path(suspected_path).is_file():
-        print(f"Warning: Suspected plate list not found at: {suspected_path}")
-        return
+    load_suspected_cache()
+    cleaned_plate = plate.strip().upper()
+    
+    def normalize(p):
+        return p.replace('-', '').replace(' ', '').upper()
         
-    with open(suspected_path, 'r', encoding='utf-8') as f:
-        content = csv.reader(f)
-        header = next(content, None)  # skip header
-        for row in content:
-            if len(row) > 0 and plate == row[0]:
-                print(f'Warning! {plate} {row[1]}')
-                i += 1
-    print('All Fine' if i == 0 else f'Found {i} vehicle suspected')
+    normalized_plate = normalize(cleaned_plate)
+    
+    matches = []
+    for cached_plate, reason in suspected_cache.items():
+        if normalize(cached_plate) == normalized_plate:
+            matches.append((cached_plate, reason))
+            
+    if len(matches) > 0:
+        for cached_plate, reason in matches:
+            print(f'Warning! {cached_plate} {reason}')
+        print(f'Found {len(matches)} vehicle suspected')
+        return True
+    else:
+        print('All Fine')
+        return False
 
 
 def csv_related(plate, veh_type, np_color):
@@ -226,9 +409,23 @@ def csv_related(plate, veh_type, np_color):
     date_today = date.today()
     now = datetime.now()
     h, m, s = now.hour, now.minute, now.second
-    time = f'{h:02d}:{m:02d}:{s:02d}'
-    new_row = [date_today, time, veh_type, plate, np_color]
+    time_str = f'{h:02d}:{m:02d}:{s:02d}'
+    
+    new_row = [date_today, time_str, veh_type, plate, np_color]
     add(new_row)
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO traffic_logs (date, time, vehicle, plate, color)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (str(date_today), time_str, veh_type, plate, np_color))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving traffic log to SQLite: {e}")
+        
     compare_plate(plate)
 
 

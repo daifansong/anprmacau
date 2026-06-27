@@ -8,3 +8,6 @@ tqdm
 matplotlib
 pandas
 PyYAML
+fastapi
+uvicorn
+python-multipart

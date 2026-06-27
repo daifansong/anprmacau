@@ -150,124 +150,174 @@ def main():
 
     # Source Processing Loop
     start_time = time.perf_counter()
-    generator = get_source_generator(args.source)
-
+    
     # For video writing
     vid_writer = None
     last_vid_name = None
 
+    try:
+        generator = run_inference(
+            model_name=args.model,
+            source=args.source,
+            ocr_model_path=args.ocr_model,
+            suspected_csv_path=args.suspected,
+            output_dir=args.output_dir,
+            device=device
+        )
+        
+        for path, frame, is_image, detections in generator:
+            if is_image:
+                out_filename = f"{args.model}_{path.name}"
+                out_path = output_path / out_filename
+                cv2.imwrite(str(out_path), frame)
+                print(f"Saved annotated image to: {out_path}")
+            else:
+                # Video mode
+                video_out_name = f"{args.model}_{path.stem}.mp4"
+                if vid_writer is None or last_vid_name != video_out_name:
+                    last_vid_name = video_out_name
+                    if vid_writer is not None:
+                        vid_writer.release()
+                    save_path = str(output_path / video_out_name)
+                    # Video properties
+                    fps = 30.0
+                    frame_w, frame_h = frame.shape[1], frame.shape[0]
+                    # Try reading FPS from source video
+                    cap_temp = cv2.VideoCapture(str(path))
+                    if cap_temp.isOpened():
+                        fps = cap_temp.get(cv2.CAP_PROP_FPS)
+                        cap_temp.release()
+                    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
+                vid_writer.write(frame)
+                
+            for det in detections:
+                print(f"Detected Macau Plate: \033[1m{det['plate_str']}\033[0m (Color: {det['plate_color']}, Attribute: {det['attribute']})")
+
+    except Exception as e:
+        print(f"Inference execution failed: {e}")
+
+    if vid_writer is not None:
+        vid_writer.release()
+        if last_vid_name:
+            print(f"Saved annotated video to: {output_path / last_vid_name}")
+
+    end_time = time.perf_counter()
+    print(f"Done. Time elapsed: {end_time - start_time:.4f}s")
+
+
+def run_inference(model_name, source, ocr_model_path=None, suspected_csv_path=None, output_dir="output", device=None):
+    if suspected_csv_path:
+        character.suspected_path = suspected_csv_path
+        
+    if device is None:
+        device = get_device()
+        
+    # Load Adapter
+    if model_name == "yolo":
+        adapter = YOLOv5Adapter(device)
+    elif model_name == "ssd":
+        adapter = SSDAdapter(device)
+    elif model_name == "edet":
+        adapter = EfficientDetAdapter(device)
+    elif model_name == "rcnn":
+        adapter = RCNNAdapter(device)
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
+        
+    try:
+        character.get_ocr_model(ocr_model_path)
+    except Exception as e:
+        print(f"Warning: OCR model initialization failed: {e}")
+        
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    crops_dir = ROOT_DIR / "crops"
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    vehicles_dir = ROOT_DIR / "vehicles"
+    vehicles_dir.mkdir(parents=True, exist_ok=True)
+
+    generator = get_source_generator(source)
+    
     for path, frame, is_image in generator:
         if frame is None:
-            print(f"Skipping invalid frame: {path}")
             continue
-
+            
         im0 = frame.copy()
         h, w = frame.shape[:2]
-
-        # 1. Detect vehicles
+        
         try:
             vehicles = adapter.detect_vehicles(frame)
         except Exception as e:
             print(f"Vehicle detection failed: {e}")
             vehicles = []
-
+            
+        detections = []
         veh_count = 0
         for veh_box, veh_conf, veh_class in vehicles:
             vx1, vy1, vx2, vy2 = veh_box
-            # Ensure coordinates are within image boundaries
             vx1, vy1, vx2, vy2 = max(0, vx1), max(0, vy1), min(w, vx2), min(h, vy2)
             if vx2 <= vx1 or vy2 <= vy1:
                 continue
-
-            # Crop vehicle image
+                
             vehicle_crop = im0[vy1:vy2, vx1:vx2]
             if vehicle_crop.size == 0:
                 continue
-
-            # Save vehicle crop
+                
             veh_count += 1
             cv2.imwrite(str(vehicles_dir / f"{veh_class}_{veh_count:02d}.png"), vehicle_crop)
-
-            # 2. Detect license plate inside vehicle crop
+            
             try:
                 plates = adapter.detect_plates(vehicle_crop)
             except Exception as e:
                 print(f"Plate detection failed for vehicle: {e}")
                 plates = []
-
-            # Draw vehicle label on frame
+                
             cv2.rectangle(frame, (vx1, vy1), (vx2, vy2), (0, 255, 0), 2)
             cv2.putText(frame, f"{veh_class} {veh_conf:.2f}", (vx1, max(vy1 - 10, 15)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
+                        
             for plate_box, plate_conf in plates:
-                # Recalculate coordinates back to original frame
                 abs_plate_box = adapter.recalculate_plate_coords(plate_box, [vx1, vy1, vx2, vy2])
                 px1, py1, px2, py2 = abs_plate_box
                 px1, py1, px2, py2 = max(0, px1), max(0, py1), min(w, px2), min(h, py2)
                 if px2 <= px1 or py2 <= py1:
                     continue
-
-                # Crop license plate from original frame
+                    
                 plate_crop = im0[py1:py2, px1:px2]
                 if plate_crop.size == 0:
                     continue
-
-                # Save plate crop to crops directory
+                    
                 cv2.imwrite(str(crops_dir / f"{path.stem}_plate.jpg"), plate_crop)
-
-                # 3. Perform segmentation and OCR
+                
                 license_plate_str = ""
                 char_color = "Indeterminated"
                 attribute = "normal"
+                is_suspected = False
                 try:
                     plate_chars, char_color, attribute = character.segment(plate_crop)
                     license_plate_str = "".join(str(v) for v in plate_chars)
-                    
-                    # 4. Check suspected database and append to log CSV
                     character.csv_related(license_plate_str, veh_class, char_color)
+                    is_suspected = character.compare_plate(license_plate_str)
                 except Exception as e:
                     print(f"OCR/CSV processing failed for plate: {e}")
-
-                # Draw plate label on frame
+                    
                 cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 0, 255), 2)
                 plate_label = f"NP: {license_plate_str} | {char_color} | {attribute}"
                 cv2.putText(frame, plate_label, (px1, max(py1 - 10, 15)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                            
+                detections.append({
+                    "vehicle_class": veh_class,
+                    "vehicle_conf": veh_conf,
+                    "plate_str": license_plate_str,
+                    "plate_color": char_color,
+                    "attribute": attribute,
+                    "is_suspected": is_suspected
+                })
                 
-                print(f"Detected Macau Plate: \033[1m{license_plate_str}\033[0m (Color: {char_color}, Attribute: {attribute})")
-
-        # 5. Output rendering
-        if is_image:
-            out_filename = f"{args.model}_{path.name}"
-            out_path = output_path / out_filename
-            cv2.imwrite(str(out_path), frame)
-            print(f"Saved annotated image to: {out_path}")
-        else:
-            # Video mode
-            video_out_name = f"{args.model}_{path.stem}.mp4"
-            if vid_writer is None or last_vid_name != video_out_name:
-                last_vid_name = video_out_name
-                if vid_writer is not None:
-                    vid_writer.release()
-                save_path = str(output_path / video_out_name)
-                # Video properties
-                fps = 30.0
-                frame_w, frame_h = frame.shape[1], frame.shape[0]
-                # Try reading FPS from source video
-                cap_temp = cv2.VideoCapture(str(path))
-                if cap_temp.isOpened():
-                    fps = cap_temp.get(cv2.CAP_PROP_FPS)
-                    cap_temp.release()
-                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
-            vid_writer.write(frame)
-
-    if vid_writer is not None:
-        vid_writer.release()
-        print(f"Saved annotated video to: {output_path / last_vid_name}")
-
-    end_time = time.perf_counter()
-    print(f"Done. Time elapsed: {end_time - start_time:.4f}s")
+        yield path, frame, is_image, detections
 
 
 if __name__ == "__main__":

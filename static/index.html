@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>澳门智能车牌识别系统 (Macau ANPR)</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Google Fonts for premium typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js for data visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Floating Alarm Alert Banner -->
+        <div id="alarmBanner" class="alarm-banner hidden">
+            <div class="alarm-icon">🚨</div>
+            <div class="alarm-content">
+                <h3>发现布控嫌疑车辆！</h3>
+                <p id="alarmText"></p>
+            </div>
+            <button class="alarm-close" onclick="closeAlarm()">×</button>
+        </div>
+
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="logo">🚗</span>
+                <h2>Macau ANPR</h2>
+            </div>
+            <nav class="nav-menu">
+                <button class="nav-item active" onclick="switchTab('detect-tab')">
+                    <span class="nav-icon">📺</span> 实时车牌检测
+                </button>
+                <button class="nav-item" onclick="switchTab('history-tab'); loadHistory();">
+                    <span class="nav-icon">📊</span> 历史查询与统计
+                </button>
+                <button class="nav-item" onclick="switchTab('blacklist-tab'); loadBlacklist();">
+                    <span class="nav-icon">👮</span> 嫌疑黑名单管理
+                </button>
+            </nav>
+            <div class="sidebar-footer">
+                <p>版本 2.0.0 (FastAPI)</p>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-bar">
+                <div class="title-section">
+                    <h1>澳门智能车牌识别管理系统</h1>
+                    <p>整合 YOLOv5 / SSD / EfficientDet 多算法定位与车牌自动校正预警平台</p>
+                </div>
+            </header>
+
+            <!-- TAB 1: REAL-TIME DETECTION -->
+            <section id="detect-tab" class="tab-content active">
+                <div class="grid-layout">
+                    <!-- Left: Control panel and inputs -->
+                    <div class="card panel-card">
+                        <h3>1. 推理与输入配置</h3>
+                        <div class="form-group">
+                            <label for="modelSelect">选择检测模型算法</label>
+                            <select id="modelSelect">
+                                <option value="yolo">YOLOv5 (推荐：速度与精度平衡)</option>
+                                <option value="ssd">SSD-Lite (轻量高效推理)</option>
+                                <option value="edet">EfficientDet (高精度细粒度)</option>
+                                <option value="rcnn">Faster R-CNN (双阶段重量级检测)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>选择输入数据源</label>
+                            <div class="source-toggle">
+                                <button id="srcImgBtn" class="toggle-btn active" onclick="setSourceType('image')">上传图片</button>
+                                <button id="srcVidBtn" class="toggle-btn" onclick="setSourceType('video')">上传视频</button>
+                            </div>
+                        </div>
+
+                        <!-- Image upload section -->
+                        <div id="imageSourceSection" class="upload-area">
+                            <input type="file" id="imageInput" accept="image/*" hidden>
+                            <div class="upload-box" onclick="document.getElementById('imageInput').click()">
+                                <span class="upload-icon">📤</span>
+                                <p id="imageUploadLabel">点击或拖拽上传车牌图片</p>
+                            </div>
+                        </div>
+
+                        <!-- Video upload section -->
+                        <div id="videoSourceSection" class="upload-area hidden">
+                            <input type="file" id="videoInput" accept="video/*" hidden>
+                            <div class="upload-box" onclick="document.getElementById('videoInput').click()">
+                                <span class="upload-icon">🎥</span>
+                                <p id="videoUploadLabel">点击或拖拽上传测试视频</p>
+                            </div>
+                        </div>
+
+                        <button id="runBtn" class="btn btn-primary" onclick="runDetection()">🚀 开始检测与识别</button>
+                    </div>
+
+                    <!-- Center/Right: Video/Image Render Frame -->
+                    <div class="card render-card">
+                        <h3>2. 图像/视频流实时预览</h3>
+                        <div class="frame-container">
+                            <div id="noFramePlaceholder" class="placeholder-text">
+                                <span class="placeholder-icon">👁️‍🗨️</span>
+                                <p>等待数据输入并开启检测...</p>
+                            </div>
+                            <img id="renderFrame" class="render-frame hidden" alt="Inference Output">
+                        </div>
+                    </div>
+
+                    <!-- Bottom: Logs of current session -->
+                    <div class="card log-card">
+                        <h3>3. 当前时段识别日志流</h3>
+                        <div class="table-container">
+                            <table id="sessionLogTable">
+                                <thead>
+                                    <tr>
+                                        <th>时间</th>
+                                        <th>车型</th>
+                                        <th>车牌号码</th>
+                                        <th>车牌颜色</th>
+                                        <th>车辆属性</th>
+                                        <th>防伪/布控状态</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr id="emptySessionRow">
+                                        <td colspan="6" style="text-align: center; color: #64748b;">暂无识别数据，请运行检测</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: HISTORY & ANALYTICS -->
+            <section id="history-tab" class="tab-content">
+                <div class="stats-row">
+                    <div class="metric-card">
+                        <span class="metric-icon">🚗</span>
+                        <div class="metric-info">
+                            <h4 id="statTotal">0</h4>
+                            <p>检测车辆总量</p>
+                        </div>
+                    </div>
+                    <div class="metric-card urgent">
+                        <span class="metric-icon">🚨</span>
+                        <div class="metric-info">
+                            <h4 id="statAlerts">0</h4>
+                            <p>黑名单警报次数</p>
+                        </div>
+                    </div>
+                    <div class="metric-card success">
+                        <span class="metric-icon">🆔</span>
+                        <div class="metric-info">
+                            <h4 id="statUnique">0</h4>
+                            <p>唯一车牌识别</p>
+                        </div>
+                    </div>
+                    <div class="metric-card warn">
+                        <span class="metric-icon">📊</span>
+                        <div class="metric-info">
+                            <h4 id="statActive">N/A</h4>
+                            <p>最活跃车型</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid-2-col">
+                    <div class="card">
+                        <h3>📊 车型分布占比</h3>
+                        <div class="chart-container">
+                            <canvas id="vehicleChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>🎨 车牌颜色分类统计</h3>
+                        <div class="chart-container">
+                            <canvas id="colorChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card margin-top">
+                    <div class="filter-bar">
+                        <h3>🔍 历史通行明细检索</h3>
+                        <div class="filter-inputs">
+                            <input type="text" id="searchPlateInput" placeholder="输入车牌号码检索..." oninput="loadHistory()">
+                            <select id="filterVehicleSelect" onchange="loadHistory()">
+                                <option value="">全部车型</option>
+                                <option value="car">Car (私家车)</option>
+                                <option value="bus">Bus (公共巴士)</option>
+                                <option value="truck">Truck (货车)</option>
+                                <option value="motorcycle">Motorcycle (电单车)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table id="historyTable">
+                            <thead>
+                                <tr>
+                                    <th>记录ID</th>
+                                    <th>通行日期</th>
+                                    <th>时间</th>
+                                    <th>车辆类型</th>
+                                    <th>车牌号码</th>
+                                    <th>车牌颜色</th>
+                                    <th>布控黑名单</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyTableBody">
+                                <!-- Dynamic rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: BLACKLIST MANAGEMENT -->
+            <section id="blacklist-tab" class="tab-content">
+                <div class="grid-layout-blacklist">
+                    <!-- Left Form -->
+                    <div class="card">
+                        <h3>➕ 录入黑名单车辆</h3>
+                        <form id="addBlacklistForm" onsubmit="submitBlacklist(event)">
+                            <div class="form-group">
+                                <label for="blackPlate">车牌号码</label>
+                                <input type="text" id="blackPlate" placeholder="如: M-12-34 或 CM-56-78" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="blackReason">布控备注原因</label>
+                                <input type="text" id="blackReason" placeholder="如: 盗抢车辆, 交通逃逸等" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary">添加布控车牌</button>
+                        </form>
+                    </div>
+
+                    <!-- Right Table list -->
+                    <div class="card">
+                        <h3>📋 当前在控嫌疑车牌库</h3>
+                        <div class="table-container">
+                            <table id="blacklistTable">
+                                <thead>
+                                    <tr>
+                                        <th>车牌号码</th>
+                                        <th>布控原因</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="blacklistTableBody">
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
